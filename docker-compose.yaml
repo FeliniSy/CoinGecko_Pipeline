@@ -5,6 +5,8 @@ x-airflow-common: &airflow-common
     context: .
     dockerfile: Dockerfile
   image: coingecko-airflow:latest
+  env_file:
+    - .env
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
@@ -13,20 +15,32 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Timezone configuration
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: 'Asia/Tbilisi'
+    AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: 'Asia/Tbilisi'
+    TZ: 'Asia/Tbilisi'
+    # Python path - add project root so imports work
+    PYTHONPATH: /opt/airflow
     # Google Cloud credentials
     GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp-key.json
-    # CoinGecko
+    # CoinGecko API
     COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+    API_COIN_MARKET: ${API_COIN_MARKET:-https://api.coingecko.com/api/v3/coins/markets}
+    API_WITH_ID: ${API_WITH_ID:-https://api.coingecko.com/api/v3/coins/{0}/market_chart}
     # BigQuery / GCS config
-    GCS_BUCKET: ${GCS_BUCKET:-your-crypto-bucket}
-    PROJECT_ID: ${BQ_PROJECT:-your-gcp-project}
-    BQ_DATASET: crypto_data
+    GCS_BUCKET: ${GCS_BUCKET:-coingeko_crypto_v2}
+    PROJECT_ID: ${PROJECT_ID:-coingeko-pipeline-v2}
+    BQ_DATASET: ${BQ_DATASET:-crypto_data}
+    BQ_STAGING: ${BQ_STAGING:-crypto_prices_staging}
+    BQ_FINAL: ${BQ_FINAL:-crypto_prices}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
-    - ./plugins:/opt/airflow/plugins
     - ./secrets:/opt/airflow/secrets
-    - ./data:/opt/airflow/data
+    # Mount pipeline modules so DAGs can import them
+    - ./pipeline:/opt/airflow/pipeline
+    - ./utils:/opt/airflow/utils
+    - ./gcp:/opt/airflow/gcp
   depends_on: &airflow-common-depends-on
     postgres:
       condition: service_healthy
