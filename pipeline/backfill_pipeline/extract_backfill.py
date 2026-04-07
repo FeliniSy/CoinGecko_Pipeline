@@ -14,13 +14,13 @@ def get_coin_list(**context) -> List[str]:
 
     all_coin_data = []
 
-    for page in range(1, 2):
+    for page in range(1, 5):
         log.info("Fetching page %s/4 for coin list...", page)
 
         params = {
             "vs_currency": "usd",
             "order": "market_cap_desc",
-            "per_page": 10,
+            "per_page": 250,
             "page": page,
             "sparkline": "false",
         }
@@ -45,7 +45,6 @@ def get_coin_list(**context) -> List[str]:
 
 
 def fetch_historical_data(**context) -> str:
-
     coins_data: List[Dict] = context["ti"].xcom_pull(task_ids="get_coin_list", key="coin_ids")
 
     if not coins_data:
@@ -68,13 +67,16 @@ def fetch_historical_data(**context) -> str:
         coin_blob_path = f"crypto/raw/date={date_str}/hour={hour}/coin_{coin_id}.json"
         coin_blob = bucket.blob(coin_blob_path)
 
-        if coin_blob.exists():
-            log.info("⏭ Skipping %s (%s/%s) - already processed", coin_id, idx)
-            coin_files.append(coin_blob_path)
-            successful_coins += 1
-            continue
+        try:
+            if coin_blob.exists(timeout=10):
+                log.info("⏭ Skipping %s (%s/%s) - already processed", coin_id, idx, len(coins_data))
+                coin_files.append(coin_blob_path)
+                successful_coins += 1
+                continue
+        except Exception as e:
+            log.warning("Could not check existence for %s: %s. Will attempt to fetch.", coin_id, str(e))
 
-        log.info("Processing %s (%s/%s)...", coin_id, idx)
+        log.info("Processing %s (%s/%s)...", coin_id, idx, len(coins_data))
 
         try:
             log.info("Fetching historical data for: %s", coin_id)
@@ -83,8 +85,7 @@ def fetch_historical_data(**context) -> str:
 
             params = {
                 "vs_currency": "usd",
-                "days": "90",
-                "interval": "daily",
+                "days": "90"
             }
 
             data = _get_with_retry(url, params)
@@ -96,8 +97,8 @@ def fetch_historical_data(**context) -> str:
 
             coin_payload = {
                 "coin_id": coin_id,
-                "symbol" : each_coin.get("symbol"),
-                "name" : each_coin.get("name"),
+                "symbol": each_coin.get("symbol"),
+                "name": each_coin.get("name"),
                 "prices": data.get("prices", []),
                 "market_caps": data.get("market_caps", []),
                 "total_volumes": data.get("total_volumes", []),
