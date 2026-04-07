@@ -10,7 +10,7 @@ from utils.settings import GCS_BUCKET, BASE_URL
 
 
 def get_coin_list(**context) -> List[str]:
-    log.info("Fetching coin list for backfill...")
+    log.info("Fetching coin list for backfill_pipeline...")
 
     all_coin_data = []
 
@@ -37,7 +37,7 @@ def get_coin_list(**context) -> List[str]:
         if page < 4:
             time.sleep(2)
 
-    log.info("Total coins to backfill: %s", len(all_coin_data))
+    log.info("Total coins to backfill_pipeline: %s", len(all_coin_data))
 
     context["ti"].xcom_push(key="coin_ids", value=all_coin_data)
 
@@ -55,7 +55,7 @@ def fetch_historical_data(**context) -> str:
     date_str = execution_dt.strftime("%Y-%m-%d")
     hour = execution_dt.strftime('%H')  # Just hour: "14", "09", etc.
 
-    log.info("Starting backfill for %s coins...", len(coins_data))
+    log.info("Starting backfill_pipeline for %s coins...", len(coins_data))
 
     successful_coins = 0
     failed_coins = []

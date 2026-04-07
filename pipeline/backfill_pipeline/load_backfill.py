@@ -2,8 +2,8 @@ import json
 
 from google.cloud import storage, bigquery
 
-from gcp.bigquery.schema import schema, json_schema
-from pipeline.transform_backfill import transform_historical_data
+from gcp.bigquery.schema import json_schema
+from pipeline.backfill_pipeline.transform_backfill import transform_historical_data
 from utils.logger import log
 from utils.settings import GCS_BUCKET, PROJECT_ID, BQ_DATASET, BQ_STAGING
 
@@ -12,7 +12,7 @@ def load_backfill_to_staging(**context) -> int:
 
     manifest_path: str = context["ti"].xcom_pull(task_ids="fetch_historical")
 
-    log.info("Loading backfill manifest from: gs://%s/%s", GCS_BUCKET, manifest_path)
+    log.info("Loading backfill_pipeline manifest from: gs://%s/%s", GCS_BUCKET, manifest_path)
 
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET)
