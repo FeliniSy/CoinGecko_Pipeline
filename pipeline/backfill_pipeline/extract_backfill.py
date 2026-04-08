@@ -1,159 +1,86 @@
-import json
 import time
 from datetime import datetime
-from typing import List, Dict
+from typing import Dict, Tuple
 
 from gcp.gcs.gcs_client import gsc_client
-from utils.helper import _get_with_retry
+from utils.helper import get_coin_list, _build_coin_blob_path, _fetch_coin_historical_data, \
+    _build_coin_payload, _create_manifest
 from utils.logger import log
-from utils.settings import GCS_BUCKET, BASE_URL
+from utils.settings import BASE_URL
 
 
-def get_coin_list(**context) -> List[str]:
-    log.info("Fetching coin list for backfill_pipeline...")
+def _process_single_coin(
+        coin_metadata: Dict,
+        date_str: str,
+        hour: str,
+        execution_dt: datetime,
+        days: int = 90,
+        sleep_seconds: int = 2
+) -> Tuple[str, bool]:
+    coin_id = coin_metadata.get("id")
+    coin_blob_path = _build_coin_blob_path(date_str, hour, coin_id)
 
-    all_coin_data = []
+    if gsc_client.blob_exists(coin_blob_path, timeout=10):
+        log.info("⏭ Skipping %s - already exists", coin_id)
+        return coin_blob_path, True
 
-    for page in range(1, 5):
-        log.info("Fetching page %s/4 for coin list...", page)
+    log.info("Fetching historical data for: %s", coin_id)
 
-        params = {
-            "vs_currency": "usd",
-            "order": "market_cap_desc",
-            "per_page": 250,
-            "page": page,
-            "sparkline": "false",
-        }
-        data = _get_with_retry(f"{BASE_URL}/markets", params)
+    data = _fetch_coin_historical_data(coin_id, days)
 
-        if not data:
-            log.warning("Empty response on page %s", page)
-            break
+    if not data:
+        log.warning("Empty response for coin: %s", coin_id)
+        return None, False
 
-        all_coin_data.extend(data)
+    coin_payload = _build_coin_payload(coin_metadata, data, execution_dt.isoformat())
+    gsc_client.upload_json(coin_blob_path, coin_payload, timeout=60)
 
-        log.info("Page %s: collected %s coin IDs", page, len(data))
+    log.info("%s: %s price points uploaded", coin_id, len(data.get("prices", [])))
 
-        if page < 4:
-            time.sleep(2)
+    if sleep_seconds > 0:
+        time.sleep(sleep_seconds)
 
-    log.info("Total coins to backfill_pipeline: %s", len(all_coin_data))
-
-    context["ti"].xcom_push(key="coin_ids", value=all_coin_data)
-
-    return all_coin_data
+    return coin_blob_path, True
 
 
-def fetch_historical_data(**context) -> str:
-    coins_data: List[Dict] = context["ti"].xcom_pull(task_ids="get_coin_list", key="coin_ids")
+def fetch_historical_data(days: int = 90, sleep_seconds: int = 2, **context) -> str:
+    all_coin_data = get_coin_list(BASE_URL)
 
-    if not coins_data:
-        raise ValueError("No coin IDs found in XCom from get_coin_list task")
+    if not all_coin_data:
+        raise ValueError("No coin IDs found from get_coin_list")
 
     execution_dt: datetime = context["execution_date"]
     date_str = execution_dt.strftime("%Y-%m-%d")
-    hour = execution_dt.strftime('%H')  # Just hour: "14", "09", etc.
+    hour = execution_dt.strftime('%H')
 
-    log.info("Starting backfill_pipeline for %s coins...", len(coins_data))
+    log.info("Starting backfill for %s coins (%s days of history)...", len(all_coin_data), days)
 
-    successful_coins = 0
     failed_coins = []
     coin_files = []
 
-    bucket = gsc_client.bucket
-
-    for idx, each_coin in enumerate(coins_data, 1):
-        coin_id = each_coin.get("id")
-        coin_blob_path = f"crypto/raw/date={date_str}/hour={hour}/coin_{coin_id}.json"
-        coin_blob = bucket.blob(coin_blob_path)
+    for idx, coin_metadata in enumerate(all_coin_data, 1):
+        coin_id = coin_metadata.get("id")
+        log.info("Processing %s (%s/%s)...", coin_id, idx, len(all_coin_data))
 
         try:
-            if coin_blob.exists(timeout=10):
-                log.info("⏭ Skipping %s (%s/%s) - already processed", coin_id, idx, len(coins_data))
-                coin_files.append(coin_blob_path)
-                successful_coins += 1
-                continue
-        except Exception as e:
-            log.warning("Could not check existence for %s: %s. Will attempt to fetch.", coin_id, str(e))
-
-        log.info("Processing %s (%s/%s)...", coin_id, idx, len(coins_data))
-
-        try:
-            log.info("Fetching historical data for: %s", coin_id)
-
-            url = f"{BASE_URL}/{coin_id}/market_chart"
-
-            params = {
-                "vs_currency": "usd",
-                "days": "90"
-            }
-
-            data = _get_with_retry(url, params)
-
-            if not data:
-                log.warning("Empty response for coin: %s", coin_id)
-                failed_coins.append(coin_id)
-                continue
-
-            coin_payload = {
-                "coin_id": coin_id,
-                "symbol": each_coin.get("symbol"),
-                "name": each_coin.get("name"),
-                "prices": data.get("prices", []),
-                "market_caps": data.get("market_caps", []),
-                "total_volumes": data.get("total_volumes", []),
-                "fetched_at": execution_dt.isoformat(),
-            }
-
-            coin_blob.upload_from_string(
-                json.dumps(coin_payload, ensure_ascii=False),
-                content_type="application/json"
+            blob_path, success = _process_single_coin(
+                coin_metadata, date_str, hour, execution_dt, days, sleep_seconds
             )
 
-            successful_coins += 1
-            coin_files.append(coin_blob_path)
-
-            log.info("✓ %s: uploaded %s price points → gs://%s/%s",
-                     coin_id, len(data.get("prices", [])), GCS_BUCKET, coin_blob_path)
-
-            time.sleep(2)
+            if success:
+                coin_files.append(blob_path)
+            else:
+                failed_coins.append(coin_id)
 
         except Exception as e:
             log.error("Failed to fetch %s: %s", coin_id, str(e))
             failed_coins.append(coin_id)
-            continue
 
         if idx % 10 == 0:
-            log.info("Progress: %s/%s coins (Success: %s, Failed: %s)",
-                     idx, successful_coins, len(failed_coins))
-
-    if successful_coins == 0:
-        raise ValueError("Failed to fetch any historical data")
-
-    log.info("Backfill fetch complete. Success: %s/%s coins",
-             successful_coins)
+            log.info("Progress: %s/%s coins processed (%s failed)",
+                     idx, len(all_coin_data), len(failed_coins))
 
     if failed_coins:
         log.warning("Failed coins (%s): %s", len(failed_coins), failed_coins[:10])
 
-    manifest_path = f"crypto/raw/date={date_str}/hour={hour}/manifest.json"
-    manifest = {
-        "date": date_str,
-        "hour": hour,
-        "fetched_at": execution_dt.isoformat(),
-        "total_coins": len(coins_data),
-        "successful_coins": successful_coins,
-        "failed_coins": failed_coins,
-        "total_files": len(coin_files),
-        "coin_files": coin_files,
-    }
-
-    manifest_blob = bucket.blob(manifest_path)
-    manifest_blob.upload_from_string(
-        json.dumps(manifest, ensure_ascii=False),
-        content_type="application/json"
-    )
-
-    log.info("✓ Uploaded manifest → gs://%s/%s", GCS_BUCKET, manifest_path)
-
-    return manifest_path
+    return _create_manifest(date_str, hour, execution_dt, len(all_coin_data), coin_files, failed_coins)
