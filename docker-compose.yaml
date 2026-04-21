@@ -1,0 +1,129 @@
+version: '3.8'
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: coingecko-airflow:latest
+  env_file:
+    - .env
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Timezone configuration
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: 'Asia/Tbilisi'
+    AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: 'Asia/Tbilisi'
+    TZ: 'Asia/Tbilisi'
+    # Python path - add project root so imports work
+    PYTHONPATH: /opt/airflow
+    # Google Cloud credentials
+    GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp-key.json
+    # CoinGecko API
+    COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+    API_COIN_MARKET: ${API_COIN_MARKET:-https://api.coingecko.com/api/v3/coins/markets}
+    API_WITH_ID: ${API_WITH_ID:-https://api.coingecko.com/api/v3/coins/{0}/market_chart}
+    # BigQuery / GCS config
+    GCS_BUCKET: ${GCS_BUCKET:-coingeko_crypto_v2}
+    PROJECT_ID: ${PROJECT_ID:-coingeko-pipeline-v2}
+    BQ_DATASET: ${BQ_DATASET:-crypto_data}
+    BQ_STAGING: ${BQ_STAGING:-crypto_prices_staging}
+    BQ_FINAL: ${BQ_FINAL:-crypto_prices}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./secrets:/opt/airflow/secrets
+    # Mount pipeline modules so DAGs can import them
+    - ./pipeline:/opt/airflow/pipeline
+    - ./utils:/opt/airflow/utils
+    - ./gcp:/opt/airflow/gcp
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+  networks:
+    - airflow-net
+
+services:
+
+  # ─── PostgreSQL metadata DB ───────────────────────────────────────
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+    networks:
+      - airflow-net
+
+  # ─── DB Init + Admin User Creation ────────────────────────────────
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password admin
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+    restart: on-failure
+
+  # ─── Webserver (UI) ───────────────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ─── Scheduler ────────────────────────────────────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db-volume:
+
+networks:
+  airflow-net:
+    driver: bridge
